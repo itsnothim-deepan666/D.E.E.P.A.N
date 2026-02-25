@@ -1,6 +1,7 @@
 import sounddevice as sd
 import soundfile as sf
 import whisper
+import torch
 import os
 import numpy as np
 import keyboard
@@ -15,6 +16,17 @@ CHANNELS = 1         # Mono
 
 # Load model once so it's reused across calls
 _model = whisper.load_model("medium", device="cuda")
+
+def unload_whisper():
+    """Move Whisper model to CPU and free GPU VRAM for Ollama."""
+    global _model
+    _model.cpu()
+    torch.cuda.empty_cache()
+
+def reload_whisper():
+    """Move Whisper model back to GPU."""
+    global _model
+    _model.cuda()
 
 def normalize_text(text):
     return text.strip().lower()
@@ -31,8 +43,8 @@ def rule_engine(text):
         return {"action": "type_text", "value": text.replace("type", "", 1).strip()}
     elif "open app" in text:
         return {"action": "open_app", "value": text.replace("open app", "", 1).strip()}
-    elif "open directory" in text:
-        return {"action": "open_directory", "value": text.replace("open directory", "", 1).strip()}
+    elif "open" in text:
+        return {"action": "open", "value": text.replace("open", "", 1).strip()}
     elif "go back" in text:
         return {"action": "go_back", "value": ""}
     else:
@@ -145,6 +157,21 @@ def execute(command):
     elif action == "open":
         os.system(f"explorer {value}")
 
+def send_to_llm(text):
+    if rule_engine(text)  :
+        print("Rule Engine Matched. Executing...")
+        print("Parsed Command:", rule_engine(text))
+        execute(rule_engine(text))
+                    
+    else:
+        print("No rule matched. Sending to LLM...")
+        unload_whisper()  # Free GPU VRAM for Ollama
+        try:
+            print("Parsed Command:", llm(text))
+            execute(llm(text))
+        finally:
+            reload_whisper()  # Restore Whisper to GPU
+
 
 if __name__ == "__main__":  
     while True:
@@ -153,16 +180,9 @@ if __name__ == "__main__":
             send = input("Send? (Enter y if u have to): ")
             if send.strip().lower() == "y":
                 print("Transcription:", text)
-                 
-                if rule_engine(text)  :
-                    print("Rule Engine Matched. Executing...")
-                    print("Parsed Command:", rule_engine(text))
-                    execute(rule_engine(text))
-                    
-                else:
-                    print("No rule matched. Sending to LLM...")
-                    print("Parsed Command:", llm(text))
-                    execute(llm(text))
+                send_to_llm(text)
+            else:
+                pass
                     
         wait = input("Enter q to stop: ")
         if wait.strip().lower() == "q":
