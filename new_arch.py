@@ -42,7 +42,7 @@ def rule_engine(text):
     elif "type" in text:
         return {"action": "type_text", "value": text.replace("type", "", 1).strip()}
     elif "open app" in text:
-        return {"action": "open_app", "value": text.replace("open app", "", 1).strip()}
+        return {"action": "open_app", "value": text.replace("open app", "", 1).strip()} 
     elif "open" in text:
         return {"action": "open", "value": text.replace("open", "", 1).strip()}
     elif "go back" in text:
@@ -142,20 +142,31 @@ User: "Open Chrome"          -> {"action": "open", "value": "Chrome"}
         print("No transcription received.")
         return {}
 
+SHELL_FOLDERS = {
+    "download": "shell:Downloads",
+    "documents": "shell:Documents",
+    "desktop":   "shell:Desktop",
+    "pictures":  "shell:Pictures",
+    "music":     "shell:Music",
+    "videos":    "shell:Video",
+}
+
 def execute(command):
     print("Executing Command:", command)
     action = command.get("action")
-    value = command.get("value")
+    value = command.get("value", "").strip()
     if action == "delete":
-        if value in os.listdir:
+        if value in os.listdir("."):
             if os.path.isfile(value):
-                os.remove("value")
+                os.remove(value)
                 print(f"File {value} is removed")
             elif os.path.isdir(value):
                 shutil.rmtree(value)
                 print(f"Directory {value} is removed")
     elif action == "open":
-        os.system(f"explorer {value}")
+        target = SHELL_FOLDERS.get(value.lower(), value)
+        print(f"Opening: {target}")
+        os.system(f'explorer "{target}"')
 
 def send_to_llm(text):
     if rule_engine(text)  :
