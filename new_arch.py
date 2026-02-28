@@ -1,13 +1,19 @@
+import json
+
 import sounddevice as sd
 import soundfile as sf
 import whisper
 import torch
-import os
 import numpy as np
 import keyboard
-import os
 import ollama
 import shutil, os
+import sqlite3
+
+conn = sqlite3.connect("files.db")
+cursor = conn.cursor()
+files = cursor.execute("SELECT name, path FROM files").fetchall()
+directories = cursor.execute("SELECT name, path FROM directories").fetchall()
 
 MODEL = "llama3:8b-instruct-q4_0"  # Ollama model name
 
@@ -16,6 +22,22 @@ CHANNELS = 1         # Mono
 
 # Load model once so it's reused across calls
 _model = whisper.load_model("medium", device="cuda")
+
+def check_files_and_directories(value):
+    if value in [f[0].lower() for f in files] or value in [d[0].lower() for d in directories]:
+        options = []
+        if value in [f[0].lower() for f in files]:
+            options.extend([f[1] for f in files if f[0].lower() == value])
+        if value in [d[0].lower() for d in directories]:
+            options.extend([d[1] for d in directories if d[0].lower() == value])
+        op = input(f"Multiple matches found for '{value}'. Choose one:\n" + "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(options)) + "\nEnter number: ")
+        try:
+            return options[int(op)-1]
+        except:
+            print("Invalid choice. Defaulting to first option.")
+            return options[0]
+    else:
+        return None
 
 def unload_whisper():
     """Move Whisper model to CPU and free GPU VRAM for Ollama."""
@@ -38,11 +60,9 @@ def rule_engine(text):
     elif "paste" in text:
         return {"action": "paste", "value": ""}
     elif "delete" in text:
-        return {"action": "delete", "value": ""}
+        return {"action": "delete", "value": text.replace("delete", "", 1).strip()}
     elif "type" in text:
         return {"action": "type_text", "value": text.replace("type", "", 1).strip()}
-    elif "open app" in text:
-        return {"action": "open_app", "value": text.replace("open app", "", 1).strip()} 
     elif "open" in text:
         return {"action": "open", "value": text.replace("open", "", 1).strip()}
     elif "go back" in text:
@@ -133,7 +153,7 @@ User: "Open Chrome"          -> {"action": "open", "value": "Chrome"}
     )
         command = response.get("message", {}).get("content", "")
         try:
-            command = eval(command)  # Convert string to dict
+            command = json.loads(command)  # Convert string to dict
         except Exception as e:
             print("Error parsing command:", e)
             command = {}
@@ -156,30 +176,41 @@ def execute(command):
     action = command.get("action")
     value = command.get("value", "").strip()
     if action == "delete":
-        if value in os.listdir("."):
-            if os.path.isfile(value):
-                os.remove(value)
-                print(f"File {value} is removed")
-            elif os.path.isdir(value):
-                shutil.rmtree(value)
-                print(f"Directory {value} is removed")
+        value_ = check_files_and_directories(value)
+        if value_:
+            if os.path.isfile(value_):
+                os.remove(value_)
+            elif os.path.isdir(value_):
+                shutil.rmtree(value_)
+        else:
+            print(f"No matching file, directory '{value}'.\n Only found in shell folders, which cannot be deleted by me.")
     elif action == "open":
-        target = SHELL_FOLDERS.get(value.lower(), value)
-        print(f"Opening: {target}")
-        os.system(f'explorer "{target}"')
+        value_ = check_files_and_directories(value)
+        if value_:
+            os.startfile(value_)
+        else:
+            print(f"Trying to open '{value}' as shell folder...")
+            shell_path = SHELL_FOLDERS.get(value.lower())
+            if shell_path:
+                os.startfile(shell_path)
+            else:
+                print(f"No matching file, directory, or shell folder found for '{value}'.")
+
 
 def send_to_llm(text):
-    if rule_engine(text)  :
+    rule = rule_engine(text)
+    if rule:
         print("Rule Engine Matched. Executing...")
-        print("Parsed Command:", rule_engine(text))
-        execute(rule_engine(text))
+        print("Parsed Command:", rule)
+        execute(rule)
                     
     else:
         print("No rule matched. Sending to LLM...")
         unload_whisper()  # Free GPU VRAM for Ollama
         try:
-            print("Parsed Command:", llm(text))
-            execute(llm(text))
+            command = llm(text)
+            print("Parsed Command:", command)
+            execute(command)
         finally:
             reload_whisper()  # Restore Whisper to GPU
 

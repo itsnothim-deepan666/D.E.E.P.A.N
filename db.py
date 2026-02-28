@@ -19,5 +19,17 @@ def init_db(db_path="files.db"):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ext ON files(extension)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_modified ON files(modified)")
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS directories (
+        path TEXT PRIMARY KEY,
+        name TEXT,
+        parent TEXT,
+        modified REAL
+    )
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dir_name ON directories(name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dir_parent ON directories(parent)")
+
     conn.commit()
     conn.close()
