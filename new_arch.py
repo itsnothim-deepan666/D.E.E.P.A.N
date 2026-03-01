@@ -1,5 +1,5 @@
 import json
-
+from difflib import get_close_matches
 import sounddevice as sd
 import soundfile as sf
 import whisper
@@ -17,41 +17,75 @@ directories = cursor.execute("SELECT name, path FROM directories").fetchall()
 
 MODEL = "llama3:8b-instruct-q4_0"  # Ollama model name
 
+ALLOWED_ACTIONS = [
+    "open",
+    "delete",
+    "list_directory",
+    "get_size",
+    "show_space",
+    "navigate",
+    "go_back",
+    "copy",
+    "paste",
+    "type_text",
+    "rename",
+    "move",
+]
+
 SAMPLERATE = 16000   # Whisper native rate
 CHANNELS = 1         # Mono
 
 # Load model once so it's reused across calls
 _model = whisper.load_model("medium", device="cuda")
 
+def get_close_action(word, target):
+    matches = get_close_matches(word, target, n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+def get_close_file_or_dir(name):
+    if not name:
+        return None
+    all_names = [f[0].lower() for f in files] + [d[0].lower() for d in directories]
+    matches = get_close_matches(name.lower(), all_names, n=1, cutoff=0.6)
+    if not matches:
+        return None
+    out = []
+    match = matches[0]
+    for f in files:
+        if f[0].lower() == match:
+            out.append(f[1])
+    for d in directories:
+        if d[0].lower() == match:
+            out.append(d[1])
+    return out if out else None
+
 def check_files_and_directories(value, chooser=None):
-    """Look up value in the DB. If multiple matches, ask the user to pick one.
+    """Look up value in the DB using fuzzy matching.
+    If multiple matches, ask the user to pick one.
     
     chooser: optional callable(prompt_str, options_list) -> selected_option_str
              Defaults to terminal input() when None.
     """
-    if value in [f[0].lower() for f in files] or value in [d[0].lower() for d in directories]:
-        options = []
-        if value in [f[0].lower() for f in files]:
-            options.extend([f[1] for f in files if f[0].lower() == value])
-        if value in [d[0].lower() for d in directories]:
-            options.extend([d[1] for d in directories if d[0].lower() == value])
-
-        if len(options) == 1:
-            return options[0]
-
-        prompt = f"Multiple matches found for '{value}'. Choose one:\n" + "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(options)) + "\nEnter number: "
-        if chooser is not None:
-            selected = chooser(prompt, options)
-            return selected
-        else:
-            op = input(prompt)
-            try:
-                return options[int(op)-1]
-            except:
-                print("Invalid choice. Defaulting to first option.")
-                return options[0]
-    else:
+    paths = get_close_file_or_dir(value)
+    if not paths:
         return None
+    if len(paths) == 1:
+        return paths[0]
+
+    # Multiple matches – ask user to choose
+    prompt = (f"Multiple matches found for '{value}'. Choose one:\n"
+              + "\n".join(f"{i+1}. {opt}" for i, opt in enumerate(paths))
+              + "\nEnter number: ")
+    if chooser is not None:
+        selected = chooser(prompt, paths)
+        return selected
+    else:
+        op = input(prompt)
+        try:
+            return paths[int(op) - 1]
+        except:
+            print("Invalid choice. Defaulting to first option.")
+            return paths[0]
 
 def unload_whisper():
     """Move Whisper model to CPU and free GPU VRAM for Ollama."""
@@ -142,12 +176,18 @@ Allowed schema:
 }
 
 Allowed actions and what "value" should contain:
-- "copy"      -> value: what to copy (or "" if unspecified)
-- "paste"     -> value: "" (no target needed)
-- "delete"    -> value: file or folder name to delete
-- "type_text" -> value: the text to type
-- "open"      -> value: the app, file, folder, or thing to open
-- "go_back"   -> value: "" (no target needed)
+- "open"            -> value: the app, file, folder, or thing to open
+- "delete"          -> value: file or folder name to delete
+- "list_directory"  -> value: directory name to list (or "" for current directory)
+- "get_size"        -> value: file or folder name to get size of
+- "show_space"      -> value: "" (shows disk space)
+- "navigate"        -> value: directory name to navigate to
+- "go_back"         -> value: "" (go to parent directory)
+- "copy"            -> value: "" (copies current selection)
+- "paste"           -> value: "" (pastes clipboard)
+- "type_text"       -> value: the text to type
+- "rename"          -> value: file or folder name to rename
+- "move"            -> value: file or folder name to move
 
 Examples:
 User: "Open documents"       -> {"action": "open", "value": "documents"}
@@ -156,6 +196,12 @@ User: "Type hello world"     -> {"action": "type_text", "value": "hello world"}
 User: "Copy the selection"   -> {"action": "copy", "value": ""}
 User: "Go back"              -> {"action": "go_back", "value": ""}
 User: "Open Chrome"          -> {"action": "open", "value": "Chrome"}
+User: "Show desktop"         -> {"action": "list_directory", "value": "desktop"}
+User: "How much space"       -> {"action": "show_space", "value": ""}
+User: "Rename report.pdf"    -> {"action": "rename", "value": "report.pdf"}
+User: "Move my_file.txt"     -> {"action": "move", "value": "my_file.txt"}
+User: "Navigate to downloads" -> {"action": "navigate", "value": "downloads"}
+User: "Size of photos"       -> {"action": "get_size", "value": "photos"}
 """
             },
             {
@@ -187,17 +233,31 @@ SHELL_FOLDERS = {
 
 def execute(command, chooser=None):
     print("Executing Command:", command)
-    action = command.get("action")
+    raw_action = command.get("action")
+    if not raw_action:
+        print("No action provided in command.")
+        return
+    action = get_close_action(raw_action, ALLOWED_ACTIONS)
     value = command.get("value", "").strip()
+
+    if not action:
+        print(f"Unknown action '{raw_action}'. No close match found in allowed actions.")
+        return
+
     if action == "delete":
         value_ = check_files_and_directories(value, chooser=chooser)
         if value_:
             if os.path.isfile(value_):
                 os.remove(value_)
+                print(f"Deleted file: {value_}")
             elif os.path.isdir(value_):
                 shutil.rmtree(value_)
+                print(f"Deleted directory: {value_}")
+            else:
+                print(f"Path exists but is neither file nor directory: {value_}")
         else:
-            print(f"No matching file, directory '{value}'.\n Only found in shell folders, which cannot be deleted by me.")
+            print(f"No matching file or directory for '{value}'.")
+
     elif action == "open":
         value_ = check_files_and_directories(value, chooser=chooser)
         if value_:
@@ -209,6 +269,115 @@ def execute(command, chooser=None):
                 os.startfile(shell_path)
             else:
                 print(f"No matching file, directory, or shell folder found for '{value}'.")
+
+    elif action == "list_directory":
+        value_ = check_files_and_directories(value, chooser=chooser) if value else os.getcwd()
+        if value_ and os.path.isdir(value_):
+            contents = os.listdir(value_)
+            print(f"Contents of '{value_}':")
+            for item in contents:
+                print(f"  {item}")
+        else:
+            print(f"No matching directory found for '{value}'.")
+
+    elif action == "get_size":
+        value_ = check_files_and_directories(value, chooser=chooser)
+        if value_:
+            if os.path.isfile(value_):
+                size = os.path.getsize(value_)
+                print(f"Size of '{value_}': {size} bytes ({size / 1024:.2f} KB)")
+            elif os.path.isdir(value_):
+                total = sum(
+                    os.path.getsize(os.path.join(dp, f))
+                    for dp, _, fnames in os.walk(value_)
+                    for f in fnames
+                )
+                print(f"Size of '{value_}': {total} bytes ({total / (1024*1024):.2f} MB)")
+        else:
+            print(f"No matching file or directory for '{value}'.")
+
+    elif action == "show_space":
+        usage = shutil.disk_usage(os.getcwd())
+        print(f"Disk space — Total: {usage.total / (1024**3):.2f} GB, "
+              f"Used: {usage.used / (1024**3):.2f} GB, "
+              f"Free: {usage.free / (1024**3):.2f} GB")
+
+    elif action == "navigate":
+        value_ = check_files_and_directories(value, chooser=chooser)
+        if value_:
+            if os.path.isdir(value_):
+                os.chdir(value_)
+                print(f"Navigated to: {os.getcwd()}")
+            else:
+                # Navigate to the parent directory of a file
+                parent = os.path.dirname(value_)
+                os.chdir(parent)
+                print(f"Navigated to parent directory: {os.getcwd()}")
+        else:
+            shell_path = SHELL_FOLDERS.get(value.lower())
+            if shell_path:
+                os.startfile(shell_path)
+            else:
+                print(f"No matching directory found for '{value}'.")
+
+    elif action == "go_back":
+        parent = os.path.dirname(os.getcwd())
+        if parent and parent != os.getcwd():
+            os.chdir(parent)
+            print(f"Went back to: {os.getcwd()}")
+        else:
+            print("Already at the root directory.")
+
+    elif action == "copy":
+        keyboard.send("ctrl+c")
+        print("Sent Ctrl+C (copy).")
+
+    elif action == "paste":
+        keyboard.send("ctrl+v")
+        print("Sent Ctrl+V (paste).")
+
+    elif action == "type_text":
+        if value:
+            keyboard.write(value)
+            print(f"Typed: {value}")
+        else:
+            print("No text provided to type.")
+
+    elif action == "rename":
+        value_ = check_files_and_directories(value, chooser=chooser)
+        if value_:
+            prompt = f"Enter new name for '{os.path.basename(value_)}': "
+            if chooser is not None:
+                new_name = chooser(prompt, [])  # empty list = free text input
+            else:
+                new_name = input(prompt)
+            new_name = (new_name or "").strip()
+            if new_name:
+                new_path = os.path.join(os.path.dirname(value_), new_name)
+                os.rename(value_, new_path)
+                print(f"Renamed '{value_}' -> '{new_path}'")
+            else:
+                print("No new name provided. Rename cancelled.")
+        else:
+            print(f"No matching file or directory for '{value}'.")
+
+    elif action == "move":
+        value_ = check_files_and_directories(value, chooser=chooser)
+        if value_:
+            prompt = f"Enter destination path for '{os.path.basename(value_)}': "
+            if chooser is not None:
+                dest = chooser(prompt, [])  # empty list = free text input
+            else:
+                dest = input(prompt)
+            dest = (dest or "").strip()
+            if dest:
+                dest_path = check_files_and_directories(dest, chooser=chooser) or dest
+                shutil.move(value_, dest_path)
+                print(f"Moved '{value_}' -> '{dest_path}'")
+            else:
+                print("No destination provided. Move cancelled.")
+        else:
+            print(f"No matching file or directory for '{value}'.")
 
 
 def send_to_llm(text, chooser=None):

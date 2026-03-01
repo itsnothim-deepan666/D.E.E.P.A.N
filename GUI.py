@@ -118,16 +118,22 @@ class MainWindow(QMainWindow):
     def _submit_choice(self):
         """Read the sl no from the inputbox and unblock the worker thread."""
         text = self.inputbox.toPlainText().strip()
-        try:
-            idx = int(text) - 1
-            if 0 <= idx < len(self._choice_options):
-                selected = self._choice_options[idx]
-            else:
-                self.append_output(f"Invalid number. Defaulting to first option.")
+
+        if not self._choice_options:
+            # Free text input mode (e.g. rename, move) — return raw text
+            selected = text
+        else:
+            # Selection mode — pick from the options list by index
+            try:
+                idx = int(text) - 1
+                if 0 <= idx < len(self._choice_options):
+                    selected = self._choice_options[idx]
+                else:
+                    self.append_output(f"Invalid number. Defaulting to first option.")
+                    selected = self._choice_options[0]
+            except ValueError:
+                self.append_output(f"Invalid input. Defaulting to first option.")
                 selected = self._choice_options[0]
-        except ValueError:
-            self.append_output(f"Invalid input. Defaulting to first option.")
-            selected = self._choice_options[0]
 
         self.inputbox.clear()
         self._waiting_for_choice = False
