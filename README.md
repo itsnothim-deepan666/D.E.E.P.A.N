@@ -143,12 +143,34 @@ then i containerized the whole thing. CUDA base image, audio deps, GPU passthrou
 
 ---
 
-## where it's at now
+## 12th March 2026 — rethinking the whole architecture
 
-still evolving. still messy in some places honestly.
+so i hit a wall. the old pipeline was working, but it was one big chain — record, transcribe, parse, execute — all in one process, all tangled together. if one thing crashed, everything died. and i had to press spacebar every single time to start and stop recording. not exactly "hands-free".
 
-but every layer — from the microphone all the way to file execution — is local, controlled, and runs on my machine.
+so i rewrote the voice input from scratch.
 
-there's more to build. more edge cases that'll probably break things.
+brought in **WebRTC VAD** (Voice Activity Detection). now the mic runs continuously and automatically detects when i start and stop speaking. no button presses, no manual triggers. just talk and it picks it up.
 
-but that's the fun part. it's just getting interesting.
+switched Whisper from `medium` to `small` — still accurate enough, but way faster for real-time use.
+
+then came the big change: **multiprocessing**.
+
+split the system into separate OS processes:
+- **mic process** — owns the microphone and Whisper. captures audio, detects speech, transcribes, and pushes structured `Event` objects onto a shared queue.
+- **router process** — pulls events from the queue, logs them, measures latency. placeholder for the intent parsing layer.
+
+each process has its own Python GIL. true parallelism. no more fighting.
+
+built an `Event` dataclass to standardize everything — event ID, type, source, payload, timestamp, confidence. every piece of data flowing through the system now has structure and traceability.
+
+also added a proper stop mechanism — press **spacebar** and everything shuts down cleanly. a shared `multiprocessing.Event` flag gets set, the mic loop breaks, the router follows, all processes join. no orphaned threads, no zombie processes.
+
+the old pipeline was fine as a prototype. but this is the foundation for something real.
+
+```
+mic (VAD + Whisper) → Event Queue → Router → [future: intent parser → executor]
+```
+
+the router still just logs events for now. wiring up the intent parsing and execution layer is next. but the architecture is ready for it.
+
+> **Commit: `TBD` — multiprocess VAD architecture + stop key**
