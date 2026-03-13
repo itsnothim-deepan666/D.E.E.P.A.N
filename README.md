@@ -145,32 +145,86 @@ then i containerized the whole thing. CUDA base image, audio deps, GPU passthrou
 
 ## 12th March 2026 — rethinking the whole architecture
 
-so i hit a wall. the old pipeline was working, but it was one big chain — record, transcribe, parse, execute — all in one process, all tangled together. if one thing crashed, everything died. and i had to press spacebar every single time to start and stop recording. not exactly "hands-free".
+So i hit a wall. the old pipeline was working, but it was one big chain — record, transcribe, parse, execute — all in one process, all tangled together. if one thing crashed, everything died. and i had to press spacebar every single time to start and stop recording. not exactly "hands-free".
 
-so i rewrote the voice input from scratch.
+So i rewrote the voice input from scratch.
 
-brought in **WebRTC VAD** (Voice Activity Detection). now the mic runs continuously and automatically detects when i start and stop speaking. no button presses, no manual triggers. just talk and it picks it up.
+Brought in **WebRTC VAD** (Voice Activity Detection). Now the mic runs continuously and automatically detects when i start and stop speaking. No button presses, no manual triggers. just talk and it picks it up.
 
-switched Whisper from `medium` to `small` — still accurate enough, but way faster for real-time use.
+Switched Whisper from `medium` to `small` — still accurate enough, but way faster for real-time use.
 
-then came the big change: **multiprocessing**.
+Then came the big change: **multiprocessing**.
 
-split the system into separate OS processes:
+Split the system into separate OS processes:
 - **mic process** — owns the microphone and Whisper. captures audio, detects speech, transcribes, and pushes structured `Event` objects onto a shared queue.
 - **router process** — pulls events from the queue, logs them, measures latency. placeholder for the intent parsing layer.
 
-each process has its own Python GIL. true parallelism. no more fighting.
+Each process has its own Python GIL.
 
-built an `Event` dataclass to standardize everything — event ID, type, source, payload, timestamp, confidence. every piece of data flowing through the system now has structure and traceability.
+Built an `Event` dataclass to standardize everything — event ID, type, source, payload, timestamp, confidence. every piece of data flowing through the system now has structure and traceability.
 
-also added a proper stop mechanism — press **spacebar** and everything shuts down cleanly. a shared `multiprocessing.Event` flag gets set, the mic loop breaks, the router follows, all processes join. no orphaned threads, no zombie processes.
+Also added a proper stop mechanism — press **spacebar** and everything shuts down cleanly. A shared `multiprocessing.Event` flag gets set, the mic loop breaks, the router follows, all processes join. no orphaned threads, no zombie processes.
 
-the old pipeline was fine as a prototype. but this is the foundation for something real.
+The old pipeline was fine as a prototype. but this is the foundation for something real.
 
 ```
 mic (VAD + Whisper) → Event Queue → Router → [future: intent parser → executor]
 ```
 
-the router still just logs events for now. wiring up the intent parsing and execution layer is next. but the architecture is ready for it.
+The router still just logs events for now. wiring up the intent parsing and execution layer is next. but the architecture is ready for it.
 
 > **Commit: `TBD` — multiprocess VAD architecture + stop key**
+
+---
+
+## 13th March 2026 — unified pipeline + gui control
+
+today was about making the architecture actually usable.
+
+i didn't want separate code paths anymore where voice goes one way and typed text goes another.
+
+so i built a new mic gui that can do both:
+- continuous mic input (with VAD + Whisper)
+- manual text input from the gui textbox
+
+both now follow the exact same backend path:
+
+```
+input (voice or text) -> router -> intent engine -> executor -> result event
+```
+
+that part mattered a lot. now i can test with typed commands quickly, and whatever works there also works through speech.
+
+also changed the spacebar behavior in the mic worker. it's no longer a global shutdown trigger.
+
+now space is a **push key**: it finalizes the currently buffered speech and sends it downstream immediately.
+
+next big change: added an executor worker and wired result events back through the pipeline, so actions are no longer just recognized and printed as intent.
+
+and for safety/accuracy, open actions now verify target locations against `files.db` first (with fuzzy matching), similar to the older architecture. only after db lookup fails does it fall back to known shell folders.
+
+this was the first point where the new architecture started feeling complete instead of just experimental.
+
+> **Commit: `TBD` — gui + executor + db-verified open path**
+
+---
+
+## 13th March 2026 (later) — on-demand mic instead of always-on
+
+small but important UX fix.
+
+the gui used to start the mic process immediately on launch. so the moment you opened the app, Whisper was loaded, the mic was hot, and the VAD loop was spinning in the background whether you wanted it or not. felt wrong.
+
+changed it so the mic is completely off by default.
+
+added a **Start Listening / Stop Listening** toggle button. when you click it, the mic process spawns fresh. when you click it again, the stop event is set and the process is joined cleanly.
+
+the rest of the pipeline — router, intent engine, executor — still starts at launch. they need to be ready for text input before the mic is even involved. that part makes sense to keep always-on.
+
+mic process now gets its own separate stop event. the backend processes get theirs. clean separation.
+
+also added a status label so you can see at a glance whether the mic is active or not.
+
+small change, but it means the system is quiet unless you explicitly tell it to listen.
+
+> **Commit: `TBD` — on-demand mic toggle button**
